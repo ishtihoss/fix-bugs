@@ -9,19 +9,31 @@ allowed-tools: Bash, Read, Grep, Glob
 
 Drive a loop that fixes bugs from `$ARGUMENTS` one at a time. Each iteration spawns a fresh `claude -p` so the working context stays small across the whole run.
 
-## Assumed bug-file format
+## Canonical bug-file format
 
-- Bugs are `### ` headings.
+The loop's counters and per-iteration prompt both key off this shape — no heuristics, no tolerance:
+
+- Every bug is a `### N. Title` heading (numbered, unique across the file).
 - A bug is **fixed** iff its `### ` heading contains the literal string `FIXED` (e.g. `### 3. Foo — FIXED`).
-- Severity groups use `## High severity`, `## Medium severity`, `## Low severity` (the inner prompt will prefer higher severity).
+- Severity groups are `## High severity`, `## Medium severity`, `## Low severity` — exactly these three strings. The inner prompt walks them in order.
+- No other `### ` headings exist in the file. Section labels, commentary, and summaries live at `##` or below-`###` levels only.
+
+Non-conforming files are normalised in step 2 before the loop runs. The counters can't tell a stray `### Critical` section label from a real bug heading, so the skill fixes the file instead of hardening the counters.
 
 ## What you (the model running this skill) do
 
 1. **Validate the argument.** If `$ARGUMENTS` is empty or the file doesn't exist, stop and tell the user.
-2. **Pick model + effort for the inner `claude -p` sessions.** Subprocesses do NOT inherit the parent session's `/model` or `/effort` overrides — those live only in the parent's runtime. You must pass them explicitly. Defaults if the user hasn't said otherwise: `opus` + `xhigh`. If the user recently mentioned a different model/effort for this work (e.g. "I'm running sonnet today"), use that. If genuinely unsure, ask in one sentence. Export `CLAUDE_FIX_MODEL` and `CLAUDE_FIX_EFFORT` before kicking off the loop — the script reads them.
-3. **Kick off the loop script below via Bash with `run_in_background: true`.** It writes progress to `.fix-bugs.log` in the same directory as the bug file.
-4. **Monitor** the log (tail it periodically, or use `Monitor` on the bash process). Do NOT sleep-poll tightly — the Monitor tool notifies on new lines.
-5. When the loop exits, **read the final bug file** and report to the user: how many bugs were fixed this run, what remains unfixed, and any newly-discovered bugs that were appended.
+2. **Normalise the bug-file format.** Read the file. If it already matches the canonical format above exactly, skip this step. Otherwise rewrite it in place so the loop can address every bug:
+   - **Bullet-item bugs** (`- **Title** — body…` under a heading) → promote each bullet to a `### N. Title` heading with the bullet body verbatim as the entry body. Preserve any existing `— FIXED` marker.
+   - **Sub-severity `### ` labels** (e.g. `### Critical`, `### Medium`, `### Minor` used as section headers, not as numbered bugs) → delete the label and treat its children as bugs under the mapped canonical severity section (Critical → High, Medium → Medium, Minor → Low).
+   - **Non-canonical `## ` sections** (e.g. `## Bugs found in review of commit X`, `## Highest-leverage fixes`) → keep the prose/context as a paragraph, but move the bugs under it into one of the three canonical severity sections. Pick the severity from the section name's intent; if genuinely ambiguous, ask the user which severity to use before rewriting.
+   - **Renumber** `### N.` entries sequentially across the file once restructuring is done, so no two bugs collide on a number.
+   - **Lossless on bodies**: do not rephrase, summarise, or drop existing bug descriptions or FIXED postmortems. Only restructure headings and severity grouping.
+   - Tell the user in one sentence what you changed (e.g. "Normalised 4 bullet-item bugs under Critical/Minor into `### ` headings; no content touched.") before kicking off the loop. Do not ask for confirmation — the user reviews the diff before committing.
+3. **Pick model + effort for the inner `claude -p` sessions.** Subprocesses do NOT inherit the parent session's `/model` or `/effort` overrides — those live only in the parent's runtime. You must pass them explicitly. Defaults if the user hasn't said otherwise: `opus` + `xhigh`. If the user recently mentioned a different model/effort for this work (e.g. "I'm running sonnet today"), use that. If genuinely unsure, ask in one sentence. Export `CLAUDE_FIX_MODEL` and `CLAUDE_FIX_EFFORT` before kicking off the loop — the script reads them.
+4. **Kick off the loop script below via Bash with `run_in_background: true`.** It writes progress to `.fix-bugs.log` in the same directory as the bug file.
+5. **Monitor** the log (tail it periodically, or use `Monitor` on the bash process). Do NOT sleep-poll tightly — the Monitor tool notifies on new lines.
+6. When the loop exits, **read the final bug file** and report to the user: how many bugs were fixed this run, what remains unfixed, and any newly-discovered bugs that were appended.
 
 Do not commit anything. The user reviews and commits themselves.
 
