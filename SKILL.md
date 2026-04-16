@@ -1,0 +1,118 @@
+---
+name: fix-bugs
+description: Autonomously fix every unfixed bug in a markdown bug-list file, one per fresh-context iteration, until none remain. Takes the markdown path as its argument.
+argument-hint: <path-to-bug-list.md>
+allowed-tools: Bash, Read, Grep, Glob
+---
+
+# fix-bugs — headless bug-fix loop
+
+Drive a loop that fixes bugs from `$ARGUMENTS` one at a time. Each iteration spawns a fresh `claude -p` so the working context stays small across the whole run.
+
+## Assumed bug-file format
+
+- Bugs are `### ` headings.
+- A bug is **fixed** iff its `### ` heading contains the literal string `FIXED` (e.g. `### 3. Foo — FIXED`).
+- Severity groups use `## High severity`, `## Medium severity`, `## Low severity` (the inner prompt will prefer higher severity).
+
+## What you (the model running this skill) do
+
+1. **Validate the argument.** If `$ARGUMENTS` is empty or the file doesn't exist, stop and tell the user.
+2. **Pick model + effort for the inner `claude -p` sessions.** Subprocesses do NOT inherit the parent session's `/model` or `/effort` overrides — those live only in the parent's runtime. You must pass them explicitly. Defaults if the user hasn't said otherwise: `opus` + `xhigh`. If the user recently mentioned a different model/effort for this work (e.g. "I'm running sonnet today"), use that. If genuinely unsure, ask in one sentence. Export `CLAUDE_FIX_MODEL` and `CLAUDE_FIX_EFFORT` before kicking off the loop — the script reads them.
+3. **Kick off the loop script below via Bash with `run_in_background: true`.** It writes progress to `.fix-bugs.log` in the same directory as the bug file.
+4. **Monitor** the log (tail it periodically, or use `Monitor` on the bash process). Do NOT sleep-poll tightly — the Monitor tool notifies on new lines.
+5. When the loop exits, **read the final bug file** and report to the user: how many bugs were fixed this run, what remains unfixed, and any newly-discovered bugs that were appended.
+
+Do not commit anything. The user reviews and commits themselves.
+
+## The loop
+
+Run this exactly — do not inline-edit the prompt body unless the user asks. `BUGS_FILE` must be absolute.
+
+```bash
+set -u
+BUGS_FILE="$(cd "$(dirname "$ARGUMENTS_PATH")" && pwd)/$(basename "$ARGUMENTS_PATH")"
+LOG="$(dirname "$BUGS_FILE")/.fix-bugs.log"
+MODEL="${CLAUDE_FIX_MODEL:-opus}"
+EFFORT="${CLAUDE_FIX_EFFORT:-xhigh}"
+: > "$LOG"
+
+count_unfixed() { grep -E '^### ' "$BUGS_FILE" 2>/dev/null | grep -cv 'FIXED' | tr -d '\n'; }
+count_total()   { grep -cE '^### ' "$BUGS_FILE" 2>/dev/null | tr -d '\n'; }
+state_line()    { printf '%s total, %s unfixed' "$(count_total)" "$(count_unfixed)"; }
+
+# Cap scales with actual work: 2× the initial unfixed count, + buffer for bugs
+# rule 4 may append. Minimum 5 to keep trivial runs sane.
+UNFIXED_START=$(count_unfixed)
+MAX_ITER=$(( UNFIXED_START * 2 + 5 ))
+if [ "$MAX_ITER" -lt 5 ]; then MAX_ITER=5; fi
+echo "[$(date +%H:%M:%S)] Start: $(state_line). MAX_ITER=$MAX_ITER, model=$MODEL, effort=$EFFORT" >> "$LOG"
+
+prev_unfixed=$UNFIXED_START
+prev_total=$(count_total)
+stuck_streak=0
+
+for i in $(seq 1 $MAX_ITER); do
+  if [ "$(count_unfixed)" -eq 0 ]; then
+    echo "[$(date +%H:%M:%S)] All bugs marked FIXED after $((i-1)) iteration(s). Stopping." >> "$LOG"
+    break
+  fi
+  {
+    echo ""
+    echo "=========================================="
+    echo "[$(date +%H:%M:%S)] iteration $i — $(state_line)"
+    echo "=========================================="
+  } >> "$LOG"
+
+  claude -p "You are fixing exactly ONE bug from the markdown file at $BUGS_FILE.
+
+Rules:
+1. Read $BUGS_FILE. The highest-severity unfixed bug is the first '### ' heading under '## High severity' (then Medium, then Low) that does NOT contain the word FIXED.
+2. Read the code files referenced by that bug entry. Understand the root cause — do not pattern-match a shallow fix.
+3. Implement the fix.
+4. Regression check: re-read your diff and mentally trace the modified code paths. If you introduced a new bug, fix it in the same iteration. If you *discover* a bug that existed before but wasn't listed, append it as a new '### N. <title>' entry under the appropriate '## <severity> severity' section of $BUGS_FILE — do NOT fix it this iteration.
+5. Update the bug's entry in $BUGS_FILE: append ' — FIXED' to its '### ' heading, and rewrite the body to describe (a) what the bug was and (b) what the fix was. Keep it concise — match the style of existing FIXED entries.
+6. Do NOT commit. Do NOT touch any other unfixed bug. Do NOT run the app.
+7. End with a one-line summary: 'Fixed: <bug title>'." \
+    --model "$MODEL" \
+    --effort "$EFFORT" \
+    --permission-mode bypassPermissions \
+    --max-turns 60 \
+    >> "$LOG" 2>&1 || {
+      echo "[$(date +%H:%M:%S)] iteration $i FAILED (claude exit $?). Stopping." >> "$LOG"
+      break
+    }
+
+  # Stuck detection: iteration ran but neither flipped a bug to FIXED nor
+  # appended a new one. One retry allowed; bail on the second consecutive stall.
+  cur_unfixed=$(count_unfixed)
+  cur_total=$(count_total)
+  if [ "$cur_unfixed" -ge "$prev_unfixed" ] && [ "$cur_total" -le "$prev_total" ]; then
+    stuck_streak=$((stuck_streak + 1))
+    echo "[$(date +%H:%M:%S)] iteration $i made no progress (stuck_streak=$stuck_streak)" >> "$LOG"
+    if [ "$stuck_streak" -ge 2 ]; then
+      echo "[$(date +%H:%M:%S)] No progress for 2 iterations. Stopping." >> "$LOG"
+      break
+    fi
+  else
+    stuck_streak=0
+  fi
+  prev_unfixed=$cur_unfixed
+  prev_total=$cur_total
+done
+
+echo "" >> "$LOG"
+echo "[$(date +%H:%M:%S)] Loop done. Final state: $(state_line)" >> "$LOG"
+```
+
+Before running it, in the same bash invocation:
+- `export ARGUMENTS_PATH="$ARGUMENTS"` — path to the bug file.
+- Optionally `export CLAUDE_FIX_MODEL=...` and `export CLAUDE_FIX_EFFORT=...` if the user wants a non-default model/effort for the inner sessions. Defaults are `opus` + `xhigh`. Valid effort levels: `low, medium, high, xhigh, max`.
+
+## Safety rails
+
+- `MAX_ITER` auto-sizes to `unfixed_at_start * 2 + 5` (min 5) — enough headroom for one retry per bug plus a few rule-4 appends, without blind over-spinning.
+- **Stuck detection**: if an iteration neither flipped a bug to `FIXED` nor appended a new `### ` entry, it counts as no-progress. One retry is allowed; two consecutive stalls stop the loop. Prevents burning the cap on a single unfixable bug.
+- `--permission-mode bypassPermissions` is required for autonomy. Every inner iteration is sandboxed to one bug and cannot commit.
+- If `claude -p` returns non-zero, the loop stops — the user investigates via the log.
+- The log lives next to the bug file as `.fix-bugs.log`. Gitignore it.
