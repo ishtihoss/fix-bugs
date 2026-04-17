@@ -1,13 +1,15 @@
 ---
 name: fix-bugs
-description: Autonomously fix every unfixed bug in a markdown bug-list file, one per fresh-context iteration, until none remain. Takes the markdown path as its argument.
-argument-hint: <path-to-bug-list.md>
+description: Autonomously fix every unfixed bug in a markdown bug-list file, one per fresh-context iteration, until none remain. Takes the markdown file as its argument (tag it with @).
+argument-hint: "@bug-list.md"
 allowed-tools: Bash, Read, Grep, Glob
 ---
 
 # fix-bugs — headless bug-fix loop
 
 Drive a loop that fixes bugs from `$ARGUMENTS` one at a time. Each iteration spawns a fresh `claude -p` so the working context stays small across the whole run.
+
+The argument is expected to be an `@`-tagged file reference (e.g. `/fix-bugs @BUGS.md`). The leading `@` is stripped before resolving the path — a bare path still works for backward compat.
 
 ## Canonical bug-file format
 
@@ -22,7 +24,7 @@ Non-conforming files are normalised in step 2 before the loop runs. The counters
 
 ## What you (the model running this skill) do
 
-1. **Validate the argument.** If `$ARGUMENTS` is empty or the file doesn't exist, stop and tell the user.
+1. **Validate the argument.** If `$ARGUMENTS` is empty, stop and tell the user to tag the bug file with `@` (e.g. `/fix-bugs @BUGS.md`). Strip any leading `@` from the argument before treating it as a path. If the resolved file doesn't exist, stop and tell the user.
 2. **Normalise the bug-file format.** Read the file. If it already matches the canonical format above exactly, skip this step. Otherwise rewrite it in place so the loop can address every bug:
    - **Bullet-item bugs** (`- **Title** — body…` under a heading) → promote each bullet to a `### N. Title` heading with the bullet body verbatim as the entry body. Preserve any existing `— FIXED` marker.
    - **Sub-severity `### ` labels** (e.g. `### Critical`, `### Medium`, `### Minor` used as section headers, not as numbered bugs) → delete the label and treat its children as bugs under the mapped canonical severity section (Critical → High, Medium → Medium, Minor → Low).
@@ -43,7 +45,8 @@ Run this exactly — do not inline-edit the prompt body unless the user asks. `B
 
 ```bash
 set -u
-BUGS_FILE="$(cd "$(dirname "$ARGUMENTS_PATH")" && pwd)/$(basename "$ARGUMENTS_PATH")"
+RAW_ARG="${ARGUMENTS_PATH#@}"   # strip leading @ if the user tagged the file
+BUGS_FILE="$(cd "$(dirname "$RAW_ARG")" && pwd)/$(basename "$RAW_ARG")"
 LOG="$(dirname "$BUGS_FILE")/.fix-bugs.log"
 MODEL="${CLAUDE_FIX_MODEL:-opus}"
 EFFORT="${CLAUDE_FIX_EFFORT:-xhigh}"

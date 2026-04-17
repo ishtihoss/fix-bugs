@@ -12,11 +12,13 @@ Clone into your Claude Code skills directory:
 git clone https://github.com/ishtihoss/fix-bugs.git ~/.claude/skills/fix-bugs
 ```
 
-Then invoke it from Claude Code:
+Then invoke it from Claude Code by tagging the bug file with `@`:
 
 ```
-/fix-bugs path/to/bugs.md
+/fix-bugs @bugs.md
 ```
+
+The `@`-tag lets Claude Code resolve the file for you — no need to type the full path. A bare path still works if you prefer.
 
 ## Bug-file format
 
