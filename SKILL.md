@@ -33,8 +33,8 @@ Non-conforming files are normalised in step 2 before the loop runs. The counters
    - **Lossless on bodies**: do not rephrase, summarise, or drop existing bug descriptions or FIXED postmortems. Only restructure headings and severity grouping.
    - Tell the user in one sentence what you changed (e.g. "Normalised 4 bullet-item bugs under Critical/Minor into `### ` headings; no content touched.") before kicking off the loop. Do not ask for confirmation — the user reviews the diff before committing.
 3. **Pick model + effort for the inner `claude -p` sessions.** Subprocesses do NOT inherit the parent session's `/model` or `/effort` overrides — those live only in the parent's runtime. You must pass them explicitly. Defaults if the user hasn't said otherwise: `opus` + `xhigh`. If the user recently mentioned a different model/effort for this work (e.g. "I'm running sonnet today"), use that. If genuinely unsure, ask in one sentence. Export `CLAUDE_FIX_MODEL` and `CLAUDE_FIX_EFFORT` before kicking off the loop — the script reads them.
-4. **Kick off the loop script below via Bash with `run_in_background: true`.** It writes progress to `.fix-bugs.log` in the same directory as the bug file.
-5. **Monitor** the log (tail it periodically, or use `Monitor` on the bash process). Do NOT sleep-poll tightly — the Monitor tool notifies on new lines.
+4. **Kick off the loop script below via Bash with `run_in_background: true`.** It writes progress to `.fix-bugs.log` in the same directory as the bug file. On macOS it also fires a system notification each time a bug flips to FIXED (sound: Glass) — the user gets live updates without having to read the log.
+5. **Monitor** the log (tail it periodically, or use `Monitor` on the bash process). Do NOT sleep-poll tightly — the Monitor tool notifies on new lines. `NOTIFY fixed:` log lines mark each live update and are the easiest grep target for a post-run summary.
 6. When the loop exits, **read the final bug file** and report to the user: how many bugs were fixed this run, what remains unfixed, and any newly-discovered bugs that were appended.
 
 Do not commit anything. The user reviews and commits themselves.
@@ -65,7 +65,24 @@ echo "[$(date +%H:%M:%S)] Start: $(state_line). MAX_ITER=$MAX_ITER, model=$MODEL
 
 prev_unfixed=$UNFIXED_START
 prev_total=$(count_total)
+prev_fixed=$(grep -E '^### .*FIXED' "$BUGS_FILE" 2>/dev/null | sort)
 stuck_streak=0
+
+# notify_fix <heading-line> — fire a live update for one newly-FIXED bug.
+# macOS: system notification via osascript. Other platforms: log-only (NOTIFY line).
+notify_fix() {
+  local line="$1"
+  local title
+  title=$(printf '%s' "$line" | sed -E 's/^### //; s/ — FIXED.*$//')
+  local safe
+  safe=$(printf '%s' "$title" | tr -d '"\\')
+  local remaining
+  remaining=$(count_unfixed)
+  echo "[$(date +%H:%M:%S)] NOTIFY fixed: $title ($remaining unfixed remaining)" >> "$LOG"
+  if [ "$(uname -s)" = "Darwin" ]; then
+    osascript -e "display notification \"$safe\" with title \"fix-bugs — $remaining left\" sound name \"Glass\"" >/dev/null 2>&1 || true
+  fi
+}
 
 for i in $(seq 1 $MAX_ITER); do
   if [ "$(count_unfixed)" -eq 0 ]; then
@@ -97,6 +114,17 @@ Rules:
       echo "[$(date +%H:%M:%S)] iteration $i FAILED (claude exit $?). Stopping." >> "$LOG"
       break
     }
+
+  # Live update: diff the FIXED set and notify for anything newly-flipped.
+  cur_fixed=$(grep -E '^### .*FIXED' "$BUGS_FILE" 2>/dev/null | sort)
+  new_fixes=$(comm -13 <(printf '%s\n' "$prev_fixed") <(printf '%s\n' "$cur_fixed"))
+  if [ -n "$new_fixes" ]; then
+    while IFS= read -r line; do
+      [ -z "$line" ] && continue
+      notify_fix "$line"
+    done <<< "$new_fixes"
+  fi
+  prev_fixed=$cur_fixed
 
   # Stuck detection: iteration ran but neither flipped a bug to FIXED nor
   # appended a new one. One retry allowed; bail on the second consecutive stall.
@@ -131,3 +159,4 @@ Before running it, in the same bash invocation:
 - `--permission-mode bypassPermissions` is required for autonomy. Every inner iteration is sandboxed to one bug and cannot commit.
 - If `claude -p` returns non-zero, the loop stops — the user investigates via the log.
 - The log lives next to the bug file as `.fix-bugs.log`. Gitignore it.
+- **Live updates**: after each iteration the loop diffs the FIXED set, logs a `NOTIFY fixed: <title> (N unfixed remaining)` line, and on macOS fires a system notification so the user sees progress without tailing the log. Non-Darwin platforms fall through to log-only.

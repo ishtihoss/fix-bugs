@@ -58,6 +58,8 @@ For each unfixed bug:
 
 Progress is logged to `.fix-bugs.log` next to the bug file. Gitignore it.
 
+On macOS you also get a live system notification (sound: Glass) each time a bug flips to `FIXED`, with the remaining-unfixed count in the title — so you can walk away and still know when each diff lands. Other platforms fall through to log-only (`NOTIFY fixed:` lines).
+
 ## Safety rails
 
 - **Iteration cap:** `unfixed_at_start * 2 + 5` (min 5). Enough for one retry per bug plus a few rule-4 appends, without blindly over-spinning.
