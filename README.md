@@ -58,7 +58,7 @@ For each unfixed bug:
 
 Progress is logged to `.fix-bugs.log` next to the bug file. Gitignore it.
 
-On macOS you also get a live system notification (sound: Glass) each time a bug flips to `FIXED`, with the remaining-unfixed count in the title — so you can walk away and still know when each diff lands. Other platforms fall through to log-only (`NOTIFY fixed:` lines).
+Each time a bug flips to `FIXED` the loop writes a `NOTIFY fixed: <title> (N unfixed remaining)` line. The parent Claude Code session watches for these and surfaces each one to you as a short inline update in the conversation — so you get live console-style progress without tailing the log.
 
 ## Safety rails
 
