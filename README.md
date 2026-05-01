@@ -1,6 +1,6 @@
 # fix-bugs
 
-A Claude Code skill that autonomously fixes every bug in a markdown bug-list, one per fresh-context iteration, until none remain.
+A Claude Code skill that autonomously fixes every bug in one or more markdown bug-lists, one per fresh-context iteration, until none remain.
 
 Each bug gets its own `claude -p` subprocess with an empty context — so the parent session stays small no matter how long the run is, and the inner session stays focused on exactly one bug.
 
@@ -18,7 +18,13 @@ Then invoke it from Claude Code by tagging the bug file with `@`:
 /fix-bugs @bugs.md
 ```
 
-The `@`-tag lets Claude Code resolve the file for you — no need to type the full path. A bare path still works if you prefer.
+You can also pass multiple files — they're processed sequentially in the order given, with each file's loop running to completion (or hitting a safety rail) before the next file starts:
+
+```
+/fix-bugs @bugs-foo.md @bugs-bar.md
+```
+
+The `@`-tag lets Claude Code resolve each file for you — no need to type full paths. Bare paths still work if you prefer.
 
 ## Bug-file format
 
@@ -49,16 +55,16 @@ What the bug was, and how it was fixed.
 
 ## How it works
 
-For each unfixed bug:
+For each file in the order given, and for each unfixed bug in that file:
 
 1. Spawn `claude -p` with a fresh context and a tight prompt that picks the highest-severity unfixed entry.
 2. Let it read the referenced files, implement a fix, and append ` — FIXED` to the bug's heading with a short post-mortem body.
 3. If it discovers a *new* bug while fixing, it appends a new `### ` entry instead of fixing it — keeping one-bug-per-iteration honest.
-4. Loop until every `### ` heading contains `FIXED`, or a safety rail trips.
+4. Loop until every `### ` heading in the current file contains `FIXED`, or a safety rail trips. Then move to the next file.
 
-Progress is logged to `.fix-bugs.log` next to the bug file. Gitignore it.
+Progress is logged to `.fix-bugs.log` next to each bug file. When you pass multiple files in the same directory, they share one log (with `### fix-bugs: starting <path> ###` banners between sections); files in different directories each get their own log. Gitignore them.
 
-Each time a bug flips to `FIXED` the loop writes a `NOTIFY fixed: <title> (N unfixed remaining)` line. The parent Claude Code session watches for these and surfaces each one to you as a short inline update in the conversation — so you get live console-style progress without tailing the log.
+Each time a bug flips to `FIXED` the loop writes a `NOTIFY fixed: [<basename>] <title> (N unfixed remaining)` line — the `[<basename>]` prefix appears only when more than one file is being processed, so single-file runs stay terse. The parent Claude Code session watches for these and surfaces each one to you as a short inline update in the conversation, so you get live console-style progress without tailing the log.
 
 ## Safety rails
 
