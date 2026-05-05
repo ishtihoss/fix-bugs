@@ -33,7 +33,7 @@ Non-conforming files are normalised in step 2 before the loop runs. The counters
    - **Lossless on bodies**: do not rephrase, summarise, or drop existing bug descriptions or FIXED postmortems. Only restructure headings and severity grouping.
    - Tell the user in one short sentence per modified file what you changed (e.g. "Normalised 4 bullet-item bugs in `bugs-foo.md` into `### ` headings; no content touched.") before kicking off the loop. Do not ask for confirmation — the user reviews the diff before committing.
 3. **Pick model + effort for the inner `claude -p` sessions.** Subprocesses do NOT inherit the parent session's `/model` or `/effort` overrides — those live only in the parent's runtime. You must pass them explicitly. Defaults if the user hasn't said otherwise: `opus` + `xhigh`. If the user recently mentioned a different model/effort for this work (e.g. "I'm running sonnet today"), use that. If genuinely unsure, ask in one sentence. Export `CLAUDE_FIX_MODEL` and `CLAUDE_FIX_EFFORT` before kicking off the loop — the script reads them.
-4. **Kick off the loop script below via Bash with `run_in_background: true`.** It writes progress to `.fix-bugs.log` in the same directory as each bug file (so files in the same directory share one log; files in different directories each get their own). Each time a bug flips to FIXED the loop writes a `NOTIFY fixed: [<basename>] <title> (N unfixed remaining)` line so the parent session can surface it as a live console-style update.
+4. **Kick off the loop script below via Bash with `run_in_background: true`.** The script body is wrapped in `bash <<'OUTERSCRIPT'` … `OUTERSCRIPT` so it always runs under bash regardless of the user's login shell — without the wrapper, hosts that default to zsh choke on bash-only syntax (`read -ra`, `<<<`, process substitution `<(...)`). It writes progress to `.fix-bugs.log` in the same directory as each bug file (so files in the same directory share one log; files in different directories each get their own). Each time a bug flips to FIXED the loop writes a `NOTIFY fixed: [<basename>] <title> (N unfixed remaining)` line so the parent session can surface it as a live console-style update.
 5. **Monitor** the log(s) (`Monitor` on the bash process, or periodic tail). Do NOT sleep-poll tightly — Monitor notifies on new lines. Whenever you see a new `NOTIFY fixed:` line, **immediately echo it to the user as a short one-liner** ("Fixed [bugs-foo.md] #N: title — M left") so they get live updates in the conversation without having to read the log themselves. Use these lines for the post-run summary too.
 6. When the loop exits, **read each bug file's final state** and report to the user, per file: how many bugs were fixed this run, what remains unfixed, and any newly-discovered bugs that were appended. If processing stopped early on a file due to a safety rail (subprocess failure or stuck-streak), note which file and why.
 
@@ -44,6 +44,12 @@ Do not commit anything. The user reviews and commits themselves.
 Run this exactly — do not inline-edit the prompt body unless the user asks. Both `BUGS_FILE` paths and the log path must be absolute.
 
 ```bash
+# Wrap in `bash <<'OUTERSCRIPT'` so the script always runs under bash, even when
+# the parent shell is zsh (macOS default). Without this, `read -ra`, `<<<`, and
+# process substitution `<(...)` fail under zsh with `read: bad option: -a`.
+# The single-quoted delimiter prevents the outer shell from expanding anything
+# inside, so bash sees the script body verbatim.
+bash <<'OUTERSCRIPT'
 set -u
 
 # --- Parse arguments: space-separated list of @-tagged or bare paths. ---
@@ -217,6 +223,7 @@ Rules:
     echo "[$(date +%H:%M:%S)] Loop done. Final state: $(state_line)" >> "$LOG"
   fi
 done
+OUTERSCRIPT
 ```
 
 Before running it, in the same bash invocation:
