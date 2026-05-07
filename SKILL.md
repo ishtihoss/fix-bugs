@@ -30,6 +30,7 @@ Non-conforming files are normalised in step 2 before the loop runs. The counters
    - **Sub-severity `### ` labels** (e.g. `### Critical`, `### Medium`, `### Minor` used as section headers, not as numbered bugs) → delete the label and treat its children as bugs under the mapped canonical severity section (Critical → High, Medium → Medium, Minor → Low).
    - **Non-canonical `## ` sections** (e.g. `## Bugs found in review of commit X`, `## Highest-leverage fixes`) → keep the prose/context as a paragraph, but move the bugs under it into one of the three canonical severity sections. Pick the severity from the section name's intent; if genuinely ambiguous, ask the user which severity to use before rewriting.
    - **Renumber** `### N.` entries sequentially within each file once restructuring is done, so no two bugs collide on a number inside that file.
+   - **Strip XML-illegal control bytes** (anything in `\x00–\x08\x0B\x0C\x0E–\x1F\x7F` — NUL, BS, VT, FF, SO–US, DEL). These can creep in when an author pastes from a source that interpreted `\x00` etc. as actual bytes; they make plain `grep` flip into binary-file mode (the script defends against this with `-a`, but the file should still be human-readable). Replace each byte with its textual escape (`\x00`, `\x08`, …) so the prose intent is preserved. Silent — no user prompt — but mention in the per-file summary line if any were stripped.
    - **Lossless on bodies**: do not rephrase, summarise, or drop existing bug descriptions or FIXED postmortems. Only restructure headings and severity grouping.
    - Tell the user in one short sentence per modified file what you changed (e.g. "Normalised 4 bullet-item bugs in `bugs-foo.md` into `### ` headings; no content touched.") before kicking off the loop. Do not ask for confirmation — the user reviews the diff before committing.
 3. **Pick model + effort for the inner `claude -p` sessions.** Subprocesses do NOT inherit the parent session's `/model` or `/effort` overrides — those live only in the parent's runtime. You must pass them explicitly. Defaults if the user hasn't said otherwise: `opus` + `xhigh`. If the user recently mentioned a different model/effort for this work (e.g. "I'm running sonnet today"), use that. If genuinely unsure, ask in one sentence. Export `CLAUDE_FIX_MODEL` and `CLAUDE_FIX_EFFORT` before kicking off the loop — the script reads them.
@@ -121,8 +122,14 @@ for BUGS_FILE in "${BUGS_FILES[@]}"; do
     } >> "$LOG"
   fi
 
-  count_unfixed() { grep -E '^### ' "$BUGS_FILE" 2>/dev/null | grep -cv 'FIXED' | tr -d '\n'; }
-  count_total()   { grep -cE '^### ' "$BUGS_FILE" 2>/dev/null | tr -d '\n'; }
+  # `-a` forces grep to treat the file as text. Without it, a single stray
+  # control byte (NUL/BS/VT/FF/SO–US) makes grep emit "Binary file ... matches"
+  # instead of line content, which collapses the counter to 1 and breaks
+  # MAX_ITER + stuck-detection. Step 2 also scrubs these on normalisation, but
+  # `-a` is the belt-and-braces guarantee — the script must remain robust if a
+  # future inner iteration writes a control char into a FIXED postmortem.
+  count_unfixed() { grep -aE '^### ' "$BUGS_FILE" 2>/dev/null | grep -acv 'FIXED' | tr -d '\n'; }
+  count_total()   { grep -caE '^### ' "$BUGS_FILE" 2>/dev/null | tr -d '\n'; }
   state_line()    { printf '%s total, %s unfixed' "$(count_total)" "$(count_unfixed)"; }
 
   # Cap scales with actual work: 2× the initial unfixed count, + buffer for bugs
@@ -134,7 +141,7 @@ for BUGS_FILE in "${BUGS_FILES[@]}"; do
 
   prev_unfixed=$UNFIXED_START
   prev_total=$(count_total)
-  prev_fixed=$(grep -E '^### .*FIXED' "$BUGS_FILE" 2>/dev/null | sort)
+  prev_fixed=$(grep -aE '^### .*FIXED' "$BUGS_FILE" 2>/dev/null | sort)
   stuck_streak=0
 
   # notify_fix <heading-line> — log a live update for one newly-FIXED bug.
@@ -188,7 +195,7 @@ Rules:
       }
 
     # Live update: diff the FIXED set and notify for anything newly-flipped.
-    cur_fixed=$(grep -E '^### .*FIXED' "$BUGS_FILE" 2>/dev/null | sort)
+    cur_fixed=$(grep -aE '^### .*FIXED' "$BUGS_FILE" 2>/dev/null | sort)
     new_fixes=$(comm -13 <(printf '%s\n' "$prev_fixed") <(printf '%s\n' "$cur_fixed"))
     if [ -n "$new_fixes" ]; then
       while IFS= read -r line; do
