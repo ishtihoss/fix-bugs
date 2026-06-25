@@ -97,6 +97,46 @@ if [ -n "${CLAUDE_EXTRA_DIRS:-}" ]; then
   done
 fi
 
+# --- Multi-model review plumbing --------------------------------------------
+# Each inner iteration gets an automatic second opinion from a two-model panel —
+# GLM 5.2 (`consult_glm52`) AND the latest Kimi K2.7 (`consult_kimi27`), both in
+# the `porkicoder-consult` MCP server. Headless `claude -p` does NOT auto-load
+# user-scope MCP servers, so we extract that one server entry from ~/.claude.json
+# and hand it to the inner sessions via `--mcp-config` (one config exposes BOTH
+# tools). Parsed once, reused for every file and iteration. If the server isn't
+# configured, MCP_FLAGS stays empty and the inner prompt silently falls back to
+# its own regression check — behaviour unchanged. macOS-bash-3-safe expansion
+# via ${arr[@]+"${arr[@]}"} at the call site below.
+MCP_TMPDIR="$(mktemp -d -t fix-bugs-mcp-XXXXXX 2>/dev/null || echo "")"
+MCP_CONFIG="${MCP_TMPDIR:+$MCP_TMPDIR/mcp-consult.json}"
+declare -a MCP_FLAGS=()
+if [ -n "$MCP_CONFIG" ] && [ -f "$HOME/.claude.json" ] && command -v python3 >/dev/null 2>&1; then
+  python3 - "$HOME/.claude.json" "$MCP_CONFIG" <<'PYEOF' || true
+import json, sys
+src, dst = sys.argv[1], sys.argv[2]
+try:
+    cfg = json.load(open(src))
+    entry = (cfg.get("mcpServers") or {}).get("porkicoder-consult")
+    if entry:
+        # Serialize fully, then write in one call so a mid-write failure can
+        # never leave a partial JSON that --mcp-config would choke on.
+        out = json.dumps({"mcpServers": {"porkicoder-consult": entry}})
+        open(dst, "w").write(out)
+except Exception:
+    pass
+PYEOF
+fi
+if [ -n "$MCP_CONFIG" ] && [ -s "$MCP_CONFIG" ]; then
+  MCP_FLAGS=(--mcp-config "$MCP_CONFIG")
+  MCP_REVIEW_MSG="Multi-model review ENABLED (GLM 5.2 + Kimi 2.7 via $MCP_CONFIG)"
+else
+  MCP_REVIEW_MSG="Multi-model review DISABLED (porkicoder-consult not in ~/.claude.json) — regression check only"
+fi
+# Best-effort cleanup of the temp MCP config when the script exits. ($LOG is
+# only defined inside the per-file loop, so the ENABLED/DISABLED state is logged
+# there, per file, via $MCP_REVIEW_MSG.)
+[ -n "$MCP_TMPDIR" ] && trap 'rm -rf "$MCP_TMPDIR"' EXIT
+
 # --- Truncate each unique log path exactly once before any file runs. ---
 # Two bug files in the same directory share .fix-bugs.log; we don't want the
 # second file's loop to wipe the first file's history. Linear-scan dedup keeps
@@ -152,6 +192,7 @@ for BUGS_FILE in "${BUGS_FILES[@]}"; do
   MAX_ITER=$(( UNFIXED_START * 2 + 5 ))
   if [ "$MAX_ITER" -lt 5 ]; then MAX_ITER=5; fi
   echo "[$(date +%H:%M:%S)] Start: $(state_line). MAX_ITER=$MAX_ITER, model=$MODEL, effort=$EFFORT" >> "$LOG"
+  echo "[$(date +%H:%M:%S)] $MCP_REVIEW_MSG" >> "$LOG"
 
   prev_unfixed=$UNFIXED_START
   prev_total=$(count_total)
@@ -195,7 +236,12 @@ Rules:
 1. Read $BUGS_FILE. The highest-severity unfixed bug is the first '### ' heading under '## High severity' (then Medium, then Low) that does NOT contain the word FIXED.
 2. Read the code files referenced by that bug entry. Understand the root cause — do not pattern-match a shallow fix.
 3. Implement the fix.
-4. Regression check: re-read your diff and mentally trace the modified code paths. If you introduced a new bug, fix it in the same iteration. If you *discover* a bug that existed before but wasn't listed, append it as a new '### N. <title>' entry under the appropriate '## <severity> severity' section of $BUGS_FILE — do NOT fix it this iteration.
+4. Regression check: re-read your diff and mentally trace the modified code paths. If you introduced a new bug, fix it in the same iteration. If you *discover* a bug that existed before but wasn't listed, append it as a new '### N. <title>' entry under the appropriate '## <severity> severity' section of $BUGS_FILE — do NOT fix it this iteration. Then get an automatic second opinion from a two-model panel — GLM 5.2 (MCP tool consult_glm52) AND the latest Kimi K2.7 (MCP tool consult_kimi27):
+   - These tools are only present when the MCP server is configured. If neither consult_glm52 nor consult_kimi27 is available, SKIP this entirely and SILENTLY — your own regression check above stands; do not mention it, do not fail.
+   - Neither model has any repo access, so curate ONE context bundle for both: this bug's intent (the entry's title + body), your full \`git diff\` (strip lockfile / build-output / node_modules churn), and the full current contents of the hand-written files you changed (summarize very large or generated files rather than pasting them whole).
+   - Call BOTH consult_glm52 AND consult_kimi27 with a 'question' scoped ONLY to correctness, regressions, and security — explicitly NOT style or nits — passing the SAME bundle as 'context'.
+   - If ONE tool errors, proceed with whatever ran; never let a consult error abort the iteration.
+   - VALIDATE each issue either model raises against the real code before acting on it (a model can be wrong about code it never received). Fix every CONFIRMED real issue IN THIS SAME ITERATION, before marking the bug FIXED. Discard unconfirmed or style-only findings.
 5. Update the bug's entry in $BUGS_FILE: append ' — FIXED' to its '### ' heading, and rewrite the body to describe (a) what the bug was and (b) what the fix was. Keep it concise — match the style of existing FIXED entries.
 6. Do NOT commit. Do NOT touch any other unfixed bug. Do NOT run the app.
 7. End with a one-line summary: 'Fixed: <bug title>'." \
@@ -204,6 +250,7 @@ Rules:
       --permission-mode bypassPermissions \
       --max-turns 60 \
       ${EXTRA_DIR_FLAGS[@]+"${EXTRA_DIR_FLAGS[@]}"} \
+      ${MCP_FLAGS[@]+"${MCP_FLAGS[@]}"} \
       >> "$LOG" 2>&1 || {
         echo "[$(date +%H:%M:%S)] iteration $i FAILED (claude exit $?). Stopping." >> "$LOG"
         break
@@ -263,3 +310,4 @@ Before running it, in the same bash invocation:
 - Validation is fail-fast: the script bails before any file runs if any path in the argument list is missing.
 - The log lives next to each bug file as `.fix-bugs.log`. Files in the same directory share one log, separated by `### fix-bugs: starting <path> ###` banners. Files in different directories get separate logs. Gitignore them.
 - **Live updates**: after each iteration the loop diffs the FIXED set and logs a `NOTIFY fixed: [<basename>] <title> (N unfixed remaining)` line (the `[<basename>]` prefix appears only when more than one file is being processed). The parent session watches for these and surfaces each one to the user as a short console-style update — no system notifications, just inline messages in the conversation.
+- **Automatic multi-model review (advisory).** When the `porkicoder-consult` MCP server is configured in `~/.claude.json`, each iteration's regression check (rule 4) is augmented with a second opinion from a two-model panel — GLM 5.2 (`consult_glm52`) AND the latest Kimi K2.7 (`consult_kimi27`). The MCP config is extracted once (before the file loop) and passed to every inner session via `--mcp-config` (headless `claude -p` does **not** auto-load user-scope MCP servers); each per-file loop logs the ENABLED/DISABLED state. The inner session curates a context bundle (bug intent + diff + changed-file contents — the models have no repo access), asks each model only about correctness/regressions/security, VALIDATES every raised issue against the real code, and fixes any confirmed-real issue in the SAME iteration before marking the bug FIXED. It is purely advisory: a single tool error is tolerated (proceed with whatever ran), and if the server is absent the step is skipped silently and behaviour is identical to the regression check only. The trade-off is added latency and token cost per iteration; the review never aborts the loop.
